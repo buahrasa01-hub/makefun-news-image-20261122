@@ -1,667 +1,280 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-"""make.fun entry news-image-20261122: "THE WORLD IN ONE IMAGE".
+import os, struct, zlib
 
-Draws a 1024x1024 newspaper front page that sums up the world news of
-Sunday 22 November 2026: a navy masthead that names the day, six story
-panels with flat vector scenes, and a sources footer.  Pure standard
-library, no network, no external image: every pixel comes from this
-program's own code, and two runs write identical bytes.
-"""
-
-import os
-import struct
-import zlib
-
-W = 1024
-H = 1024
-STRIDE = W * 3
-
-PAPER = (247, 243, 233)
-EDGE = (184, 176, 162)
-NAVY = (20, 32, 58)
-INK = (24, 24, 28)
+W = H = 1024
+PAPER = (247, 244, 235)
+INK = (24, 31, 39)
+MUTED = (70, 77, 82)
 WHITE = (255, 255, 255)
-CAPINK = (58, 56, 54)
-
-CANVAS = bytearray(STRIDE * H)
+NAVY = (18, 34, 57)
+IMG = [bytearray(PAPER * W) for _ in range(H)]
 CLIP = (0, 0, W, H)
 
-# ---------------------------------------------------------------- drawing --
-
-def set_clip(x0, y0, x1, y1):
-    global CLIP
-    CLIP = (int(x0), int(y0), int(x1), int(y1))
-
-
-def reset_clip():
-    global CLIP
-    CLIP = (0, 0, W, H)
-
-
-def fill_rect(x, y, w, h, c):
-    if w <= 0 or h <= 0:
-        return
-    x = int(x)
-    y = int(y)
-    w = int(w)
-    h = int(h)
-    cx0, cy0, cx1, cy1 = CLIP
-    if x < cx0:
-        w -= cx0 - x
-        x = cx0
-    if y < cy0:
-        h -= cy0 - y
-        y = cy0
-    if x + w > cx1:
-        w = cx1 - x
-    if y + h > cy1:
-        h = cy1 - y
-    if w <= 0 or h <= 0:
-        return
-    row = bytes(c) * w
-    n = w * 3
-    i = (y * W + x) * 3
-    for _ in range(h):
-        CANVAS[i:i + n] = row
-        i += STRIDE
-
-
-def fill_circle(cx, cy, r, c):
-    cx = int(cx)
-    cy = int(cy)
-    r = int(r)
-    if r < 0:
-        return
-    for dy in range(-r, r + 1):
-        lim = r * r - dy * dy
-        dx = 0
-        while (dx + 1) * (dx + 1) + dy * dy <= lim:
-            dx += 1
-        fill_rect(cx - dx, cy + dy, 2 * dx + 1, 1, c)
-
-
-def fill_ring(cx, cy, r, thick, c):
-    fill_circle(cx, cy, r, c)
-    fill_circle(cx, cy, r - thick, (0, 0, 0))
-
-
-def fill_tri(p0, p1, p2, c):
-    ax, ay = p0
-    bx, by = p1
-    cx, cy = p2
-    top = int(min(ay, by, cy))
-    bot = int(max(ay, by, cy))
-    for yy in range(top, bot + 1):
-        xs = []
-        for (x0, y0), (x1, y1) in ((p0, p1), (p1, p2), (p2, p0)):
-            if y0 == y1:
-                continue
-            if min(y0, y1) <= yy < max(y0, y1):
-                t = (yy - y0) / (y1 - y0)
-                xs.append(x0 + t * (x1 - x0))
-        if len(xs) >= 2:
-            xs.sort()
-            xa = int(xs[0])
-            xb = int(xs[-1])
-            fill_rect(xa, yy, xb - xa + 1, 1, c)
-
-
-def fill_quad(p0, p1, p2, p3, c):
-    fill_tri(p0, p1, p2, c)
-    fill_tri(p0, p2, p3, c)
-
-
-def draw_line(x0, y0, x1, y1, thick, c):
-    x0 = int(x0)
-    y0 = int(y0)
-    x1 = int(x1)
-    y1 = int(y1)
-    steps = max(abs(x1 - x0), abs(y1 - y0))
-    half = thick // 2
-    if steps == 0:
-        fill_rect(x0 - half, y0 - half, thick, thick, c)
-        return
-    for i in range(steps + 1):
-        t = i / steps
-        fill_rect(int(round(x0 + t * (x1 - x0))) - half,
-                  int(round(y0 + t * (y1 - y0))) - half,
-                  thick, thick, c)
-
-
-UNIT = (
-    1000, 0, 995, 87, 978, 208, 951, 309, 914, 407, 866, 500, 809, 588,
-    707, 707, 588, 809, 500, 866, 407, 914, 309, 951, 208, 978, 87, 995,
-    0, 1000, -87, 995, -208, 978, -309, 951, -407, 914, -500, 866, -588, 809,
-    -707, 707, -809, 588, -866, 500, -914, 407, -951, 309, -978, 208, -995, 87,
-    -1000, 0, -995, -87, -978, -208, -951, -309, -914, -407, -866, -500,
-    -809, -588, -707, -707, -588, -809, -500, -866, -407, -914, -309, -951,
-    -208, -978, -87, -995, 0, -1000, 87, -995, 208, -978, 309, -951, 407, -914,
-    500, -866, 588, -809, 707, -707, 809, -588,
-)
-
-
-def draw_arc(cx, cy, r, thick, i0, i1, c, step=2):
-    n = len(UNIT) // 2
-    i = i0
-    while i <= i1:
-        co = UNIT[(i % n) * 2]
-        si = UNIT[(i % n) * 2 + 1]
-        fill_rect(cx + co * (r - thick) // 1000, cy + si * (r - thick) // 1000,
-                  thick + 2, thick + 2, c)
-        i += step
-
-
-# ------------------------------------------------------------------- font --
-
 FONT = {
-    'A': ('01110', '10001', '10001', '11111', '10001', '10001', '10001'),
-    'B': ('11110', '10001', '10001', '11110', '10001', '10001', '11110'),
-    'C': ('01110', '10001', '10000', '10000', '10000', '10001', '01110'),
-    'D': ('11110', '10001', '10001', '10001', '10001', '10001', '11110'),
-    'E': ('11111', '10000', '10000', '11110', '10000', '10000', '11111'),
-    'F': ('11111', '10000', '10000', '11110', '10000', '10000', '10000'),
-    'G': ('01110', '10001', '10000', '10111', '10001', '10001', '01111'),
-    'H': ('10001', '10001', '10001', '11111', '10001', '10001', '10001'),
-    'I': ('11111', '00100', '00100', '00100', '00100', '00100', '11111'),
-    'J': ('00111', '00010', '00010', '00010', '00010', '10010', '01100'),
-    'K': ('10001', '10010', '10100', '11000', '10100', '10010', '10001'),
-    'L': ('10000', '10000', '10000', '10000', '10000', '10000', '11111'),
-    'M': ('10001', '11011', '10101', '10101', '10001', '10001', '10001'),
-    'N': ('10001', '11001', '10101', '10011', '10001', '10001', '10001'),
-    'O': ('01110', '10001', '10001', '10001', '10001', '10001', '01110'),
-    'P': ('11110', '10001', '10001', '11110', '10000', '10000', '10000'),
-    'Q': ('01110', '10001', '10001', '10001', '10101', '10010', '01101'),
-    'R': ('11110', '10001', '10001', '11110', '10100', '10010', '10001'),
-    'S': ('01111', '10000', '10000', '01110', '00001', '00001', '11110'),
-    'T': ('11111', '00100', '00100', '00100', '00100', '00100', '00100'),
-    'U': ('10001', '10001', '10001', '10001', '10001', '10001', '01110'),
-    'V': ('10001', '10001', '10001', '10001', '10001', '01010', '00100'),
-    'W': ('10001', '10001', '10001', '10101', '10101', '11011', '10001'),
-    'X': ('10001', '10001', '01010', '00100', '01010', '10001', '10001'),
-    'Y': ('10001', '10001', '01010', '00100', '00100', '00100', '00100'),
-    'Z': ('11111', '00001', '00010', '00100', '01000', '10000', '11111'),
-    '0': ('01110', '10001', '10011', '10101', '11001', '10001', '01110'),
-    '1': ('00100', '01100', '00100', '00100', '00100', '00100', '01110'),
-    '2': ('01110', '10001', '00001', '00010', '00100', '01000', '11111'),
-    '3': ('11111', '00010', '00100', '00010', '00001', '10001', '01110'),
-    '4': ('00010', '00110', '01010', '10010', '11111', '00010', '00010'),
-    '5': ('11111', '10000', '11110', '00001', '00001', '10001', '01110'),
-    '6': ('00110', '01000', '10000', '11110', '10001', '10001', '01110'),
-    '7': ('11111', '00001', '00010', '00100', '01000', '01000', '01000'),
-    '8': ('01110', '10001', '10001', '01110', '10001', '10001', '01110'),
-    '9': ('01110', '10001', '10001', '01111', '00001', '00010', '01100'),
-    ' ': ('00000', '00000', '00000', '00000', '00000', '00000', '00000'),
-    '.': ('00000', '00000', '00000', '00000', '00000', '01100', '01100'),
-    ',': ('00000', '00000', '00000', '00000', '00110', '00110', '01100'),
-    ':': ('00000', '01100', '01100', '00000', '01100', '01100', '00000'),
-    ';': ('00000', '01100', '01100', '00000', '01100', '00110', '01100'),
-    '!': ('00100', '00100', '00100', '00100', '00100', '00000', '00100'),
-    '?': ('01110', '10001', '00001', '00010', '00100', '00000', '00100'),
-    "'": ('00100', '00100', '01000', '00000', '00000', '00000', '00000'),
-    '-': ('00000', '00000', '00000', '11111', '00000', '00000', '00000'),
-    '/': ('00001', '00010', '00010', '00100', '01000', '01000', '10000'),
-    '(': ('00010', '00100', '01000', '01000', '01000', '00100', '00010'),
-    ')': ('01000', '00100', '00010', '00010', '00010', '00100', '01000'),
-    '%': ('11001', '11011', '00010', '00100', '01000', '11011', '10011'),
-    '&': ('01100', '10010', '10100', '01000', '10101', '10010', '01101'),
-    '+': ('00000', '00100', '00100', '11111', '00100', '00100', '00000'),
-    '=': ('00000', '00000', '11111', '00000', '11111', '00000', '00000'),
-    '$': ('00100', '01111', '10100', '01110', '00101', '11110', '00100'),
+'A':'01110 10001 10001 11111 10001 10001 10001','B':'11110 10001 10001 11110 10001 10001 11110',
+'C':'01111 10000 10000 10000 10000 10000 01111','D':'11110 10001 10001 10001 10001 10001 11110',
+'E':'11111 10000 10000 11110 10000 10000 11111','F':'11111 10000 10000 11110 10000 10000 10000',
+'G':'01111 10000 10000 10111 10001 10001 01111','H':'10001 10001 10001 11111 10001 10001 10001',
+'I':'11111 00100 00100 00100 00100 00100 11111','J':'00111 00010 00010 00010 10010 10010 01100',
+'K':'10001 10010 10100 11000 10100 10010 10001','L':'10000 10000 10000 10000 10000 10000 11111',
+'M':'10001 11011 10101 10101 10001 10001 10001','N':'10001 11001 10101 10011 10001 10001 10001',
+'O':'01110 10001 10001 10001 10001 10001 01110','P':'11110 10001 10001 11110 10000 10000 10000',
+'Q':'01110 10001 10001 10001 10101 10010 01101','R':'11110 10001 10001 11110 10100 10010 10001',
+'S':'01111 10000 10000 01110 00001 00001 11110','T':'11111 00100 00100 00100 00100 00100 00100',
+'U':'10001 10001 10001 10001 10001 10001 01110','V':'10001 10001 10001 10001 10001 01010 00100',
+'W':'10001 10001 10001 10101 10101 10101 01010','X':'10001 10001 01010 00100 01010 10001 10001',
+'Y':'10001 10001 01010 00100 00100 00100 00100','Z':'11111 00001 00010 00100 01000 10000 11111',
+'0':'01110 10001 10011 10101 11001 10001 01110','1':'00100 01100 00100 00100 00100 00100 01110',
+'2':'01110 10001 00001 00010 00100 01000 11111','3':'11110 00001 00001 01110 00001 00001 11110',
+'4':'00010 00110 01010 10010 11111 00010 00010','5':'11111 10000 10000 11110 00001 00001 11110',
+'6':'01110 10000 10000 11110 10001 10001 01110','7':'11111 00001 00010 00100 01000 01000 01000',
+'8':'01110 10001 10001 01110 10001 10001 01110','9':'01110 10001 10001 01111 00001 00001 01110',
+'.':'00000 00000 00000 00000 00000 00110 00110',',':'00000 00000 00000 00000 00110 00110 00100',
+':':'00000 00110 00110 00000 00110 00110 00000',';':'00000 00110 00110 00000 00110 00110 00100',
+'!':'00100 00100 00100 00100 00100 00000 00100','?':'01110 10001 00001 00010 00100 00000 00100',
+"'":'00100 00100 00000 00000 00000 00000 00000','-':'00000 00000 00000 11111 00000 00000 00000',
+'/':'00001 00010 00010 00100 01000 01000 10000','(':'00010 00100 01000 01000 01000 00100 00010',
+')':'01000 00100 00010 00010 00010 00100 01000','%':'11001 11010 00100 01000 10110 00110 00000',
+'&':'01100 10010 10100 01000 10101 10010 01101','+':'00000 00100 00100 11111 00100 00100 00000',
+'=':'00000 11111 00000 11111 00000 00000 00000','$':'00100 01111 10100 01110 00101 11110 00100',
+' ':'00000 00000 00000 00000 00000 00000 00000'
 }
 
+def clip(x0, y0, x1, y1):
+    global CLIP
+    CLIP = (max(0, x0), max(0, y0), min(W, x1), min(H, y1))
 
-def text_width(s, scale, tracking=None):
-    if tracking is None:
-        tracking = scale
-    n = len(s)
-    if n == 0:
-        return 0
-    return n * 5 * scale + (n - 1) * tracking
+def rect(x, y, w, h, color):
+    x0, y0, x1, y1 = CLIP
+    l, t, r, b = max(x, x0), max(y, y0), min(x+w, x1), min(y+h, y1)
+    if l >= r or t >= b: return
+    span = bytes(color) * (r-l)
+    for yy in range(t, b): IMG[yy][l*3:r*3] = span
 
+def circle(cx, cy, radius, color):
+    for dy in range(-radius, radius+1):
+        dx = int((radius*radius-dy*dy)**0.5)
+        rect(cx-dx, cy+dy, dx*2+1, 1, color)
 
-def draw_text(x, y, s, scale, c, tracking=None):
-    if tracking is None:
-        tracking = scale
-    cx = x
-    for ch in s.upper():
-        g = FONT.get(ch)
-        if g is not None:
-            for r in range(7):
-                row = g[r]
-                i = 0
-                while i < 5:
-                    if row[i] == '1':
-                        run = 1
-                        while i + run < 5 and row[i + run] == '1':
-                            run += 1
-                        fill_rect(cx + i * scale, y + r * scale, run * scale, scale, c)
-                        i += run
-                    else:
-                        i += 1
-        cx += 5 * scale + tracking
-    return text_width(s, scale, tracking)
+def line(x0, y0, x1, y1, color, size=2):
+    dx, dy = abs(x1-x0), abs(y1-y0)
+    sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+    err = dx-dy
+    while True:
+        rect(x0-size//2, y0-size//2, size, size, color)
+        if x0 == x1 and y0 == y1: break
+        e = err*2
+        if e > -dy: err -= dy; x0 += sx
+        if e < dx: err += dx; y0 += sy
 
-
-def draw_text_center(cx, y, s, scale, c, tracking=None):
-    w = text_width(s, scale, tracking)
-    return draw_text(cx - w // 2, y, s, scale, c, tracking)
-
-
-def wrap_fit(text, maxw, scale, maxlines):
-    words = text.split()
-    lines = []
-    i = 0
-    while i < len(words) and len(lines) < maxlines:
-        cur = words[i]
-        i += 1
-        while i < len(words) and text_width(cur + ' ' + words[i], scale) <= maxw:
-            cur = cur + ' ' + words[i]
-            i += 1
-        lines.append(cur)
-    return lines
-
-
-# ----------------------------------------------------------------- scenes --
-
-def missile(x, y):
-    fill_tri((x, y), (x - 16, y + 5), (x, y + 10), (255, 156, 56))
-    fill_tri((x, y + 2), (x - 8, y + 5), (x, y + 8), (255, 222, 120))
-    fill_rect(x, y, 42, 10, (196, 62, 58))
-    fill_tri((x + 42, y), (x + 42, y + 10), (x + 56, y + 5), (216, 84, 76))
-    fill_tri((x, y), (x - 8, y - 7), (x + 6, y), (170, 48, 46))
-    fill_tri((x, y + 10), (x - 8, y + 17), (x + 6, y + 10), (170, 48, 46))
-
-
-def drone(x, y):
-    fill_rect(x, y, 26, 4, (72, 76, 86))
-    fill_rect(x + 11, y + 4, 5, 7, (58, 62, 72))
-    fill_rect(x + 4, y + 11, 18, 3, (72, 76, 86))
-    fill_circle(x + 2, y + 2, 3, (150, 156, 166))
-    fill_circle(x + 24, y + 2, 3, (150, 156, 166))
-
-
-def scene_gulf(x, y, sw, sh):
-    fill_rect(x, y, 472, 78, (46, 60, 100))
-    fill_rect(x, y, 472, 24, (66, 78, 120))
-    fill_rect(x, y + 78, 472, 56, (221, 195, 142))
-    fill_circle(x + 392, y + 90, 26, (238, 162, 94))
-    # air-defence radar site
-    fill_rect(x + 92, y + 50, 6, 46, (176, 182, 192))
-    fill_circle(x + 78, y + 44, 25, (216, 221, 229))
-    fill_circle(x + 78, y + 44, 16, (46, 60, 100))
-    fill_circle(x + 78, y + 44, 5, (200, 206, 216))
-    fill_quad((x + 68, y + 96), (x + 112, y + 96), (x + 118, y + 126),
-              (x + 62, y + 126), (168, 174, 184))
-    # shield over the base
-    fill_circle(x + 232, y + 108, 44, (86, 146, 214))
-    fill_circle(x + 232, y + 108, 32, (132, 180, 234))
-    fill_rect(x + 234, y + 104, 46, 46, (221, 195, 142))
-    fill_rect(x + 186, y + 108, 100, 42, (221, 195, 142))
-    # incoming missiles and drones
-    missile(x + 296, y + 22)
-    missile(x + 268, y + 58)
-    missile(x + 372, y + 44)
-    drone(x + 196, y + 16)
-    drone(x + 380, y + 8)
-    # struck industrial plant with fire and smoke
-    fill_rect(x + 336, y + 92, 88, 42, (104, 108, 118))
-    fill_rect(x + 336, y + 92, 88, 6, (88, 92, 102))
-    fill_rect(x + 348, y + 76, 14, 18, (96, 100, 110))
-    fill_rect(x + 372, y + 82, 12, 12, (96, 100, 110))
-    fill_circle(x + 358, y + 102, 13, (248, 146, 48))
-    fill_tri((x + 346, y + 106), (x + 358, y + 78), (x + 372, y + 106), (255, 198, 76))
-    fill_circle(x + 388, y + 74, 11, (176, 178, 186))
-    fill_circle(x + 404, y + 56, 14, (188, 190, 198))
-    fill_circle(x + 424, y + 38, 16, (198, 200, 208))
-    fill_circle(x + 446, y + 20, 18, (208, 210, 218))
-
-
-def window_grid(bx, by, bw, bh, seed):
-    for wy in range(by + 10, by + bh - 10, 18):
-        for wx in range(bx + 8, bx + bw - 10, 16):
-            if ((wx - bx) // 16 + (wy - by) // 18 + seed) % 3 != 0:
-                fill_rect(wx, wy, 7, 9, (250, 214, 126))
-
-
-def scene_mexico(x, y, sw, sh):
-    fill_rect(x, y, 472, 134, (18, 24, 46))
-    fill_circle(x + 62, y + 26, 15, (232, 226, 190))
-    fill_circle(x + 69, y + 21, 13, (18, 24, 46))
-    # low buildings with lit windows
-    lows = ((x + 4, 62, 84, 0), (x + 74, 48, 66, 1), (x + 128, 56, 92, 2),
-            (x + 190, 44, 72, 0), (x + 240, 66, 96, 1), (x + 312, 52, 78, 2),
-            (x + 370, 42, 64, 1), (x + 416, 52, 86, 0))
-    for bx, bw, bh, seed in lows:
-        fill_rect(bx, y + 134 - bh, bw, bh, (32, 38, 62))
-        window_grid(bx, y + 134 - bh, bw, bh, seed)
-    # street
-    fill_rect(x, y + 116, 472, 18, (52, 54, 66))
-    for dx in range(10, 452, 56):
-        fill_rect(x + dx, y + 124, 26, 3, (216, 210, 176))
-    # searchlight beam from the helicopter
-    set_clip(x + 328, y + 44, x + 384, y + 116)
-    fill_tri((x + 352, y + 44), (x + 340, y + 116), (x + 372, y + 116),
-             (246, 233, 176))
-    reset_clip()
-    # helicopter: rotor, body, tail boom, tail rotor, skids
-    fill_rect(x + 300, y + 6, 104, 4, (176, 182, 194))
-    fill_rect(x + 348, y + 10, 6, 8, (140, 146, 158))
-    fill_quad((x + 328, y + 18), (x + 386, y + 18), (x + 380, y + 40),
-              (x + 334, y + 40), (74, 78, 90))
-    fill_tri((x + 328, y + 20), (x + 310, y + 29), (x + 328, y + 38), (88, 92, 104))
-    fill_quad((x + 382, y + 22), (x + 434, y + 18), (x + 434, y + 24),
-              (x + 382, y + 36), (74, 78, 90))
-    fill_rect(x + 430, y + 10, 4, 22, (100, 104, 116))
-    fill_quad((x + 433, y + 10), (x + 444, y + 4), (x + 444, y + 10),
-              (x + 433, y + 16), (140, 146, 158))
-    fill_rect(x + 338, y + 42, 5, 8, (100, 104, 116))
-    fill_rect(x + 370, y + 42, 5, 8, (100, 104, 116))
-    fill_rect(x + 330, y + 50, 56, 3, (150, 156, 168))
-    fill_rect(x + 342, y + 28, 26, 8, (150, 190, 226))
-    # wanted poster
-    fill_rect(x + 52, y + 56, 62, 74, (238, 234, 220))
-    fill_rect(x + 52, y + 56, 62, 3, (70, 70, 74))
-    fill_rect(x + 52, y + 127, 62, 3, (70, 70, 74))
-    fill_rect(x + 52, y + 56, 3, 74, (70, 70, 74))
-    fill_rect(x + 111, y + 56, 3, 74, (70, 70, 74))
-    draw_text(x + 59, y + 63, "WANTED", 1, (40, 40, 44))
-    fill_circle(x + 83, y + 92, 12, (58, 52, 48))
-    fill_rect(x + 60, y + 107, 46, 3, (110, 106, 100))
-    fill_rect(x + 66, y + 114, 34, 3, (110, 106, 100))
-    # soldiers and the escorted prisoner
-    for fx in (x + 152, x + 192):
-        fill_rect(fx, y + 74, 20, 44, (52, 62, 52))
-        fill_rect(fx - 3, y + 58, 26, 7, (38, 44, 38))
-        fill_circle(fx + 10, y + 66, 8, (96, 78, 60))
-        fill_rect(fx + 6, y + 92, 8, 26, (30, 34, 30))
-        fill_rect(fx + 24, y + 70, 14, 4, (60, 60, 64))
-        fill_rect(fx + 22, y + 62, 4, 14, (60, 60, 64))
-    fill_rect(x + 236, y + 78, 22, 40, (78, 70, 62))
-    fill_circle(x + 247, y + 70, 7, (110, 88, 68))
-    fill_circle(x + 242, y + 118, 5, (198, 202, 210))
-    fill_circle(x + 254, y + 118, 5, (198, 202, 210))
-    fill_rect(x + 234, y + 86, 26, 5, (160, 164, 172))
-
-
-def scene_climate(x, y, sw, sh):
-    fill_rect(x, y, 472, 134, (226, 230, 238))
-    fill_rect(x, y + 108, 472, 26, (196, 188, 170))
-    fill_rect(x, y, 472, 10, (208, 214, 226))
-    # summit banner with COP31
-    fill_rect(x + 56, y + 18, 148, 66, (26, 78, 146))
-    fill_rect(x + 56, y + 18, 148, 4, (16, 52, 104))
-    fill_rect(x + 56, y + 80, 148, 4, (16, 52, 104))
-    draw_text_center(x + 130, y + 38, "COP31", 3, (250, 250, 246))
-    fill_rect(x + 74, y + 70, 112, 4, (250, 250, 246))
-    # globe
-    fill_circle(x + 268, y + 52, 30, (48, 112, 182))
-    fill_circle(x + 258, y + 40, 10, (92, 168, 96))
-    fill_circle(x + 280, y + 60, 8, (92, 168, 96))
-    fill_circle(x + 262, y + 68, 6, (92, 168, 96))
-    fill_rect(x + 238, y + 52, 60, 3, (150, 196, 232))
-    fill_rect(x + 262, y + 22, 3, 60, (150, 196, 232))
-    # oil barrel with a red cross over it
-    fill_rect(x + 330, y + 30, 42, 56, (94, 96, 104))
-    fill_rect(x + 330, y + 30, 42, 7, (128, 130, 138))
-    fill_rect(x + 334, y + 56, 34, 8, (58, 60, 68))
-    fill_rect(x + 336, y + 34, 4, 52, (110, 112, 120))
-    fill_rect(x + 362, y + 34, 4, 52, (110, 112, 120))
-    draw_line(x + 324, y + 24, x + 378, y + 92, 7, (206, 62, 58))
-    draw_line(x + 378, y + 24, x + 324, y + 92, 7, (206, 62, 58))
-    # mostly empty tables with a few delegates
-    for tx, tlen in ((x + 20, 120), (x + 156, 120), (x + 292, 150)):
-        fill_rect(tx, y + 92, tlen, 7, (156, 116, 78))
-        fill_rect(tx + 8, y + 99, 6, 22, (128, 96, 66))
-        fill_rect(tx + tlen - 14, y + 99, 6, 22, (128, 96, 66))
-    for dx in (x + 44, x + 108, x + 196, x + 320, x + 392):
-        fill_rect(dx, y + 108, 22, 26, (72, 84, 104))
-        fill_circle(dx + 11, y + 101, 8, (216, 186, 152))
-
-
-def scene_eu_indonesia(x, y, sw, sh):
-    fill_rect(x, y, 472, 100, (152, 198, 236))
-    fill_rect(x, y, 472, 12, (176, 214, 240))
-    fill_rect(x, y + 100, 472, 34, (52, 110, 176))
-    # EU flag: circle of twelve stars
-    fill_rect(x + 34, y + 20, 96, 64, (18, 40, 132))
-    for i in range(12):
-        ax = (0, 9, 16, 18, 16, 9, 0, -9, -16, -18, -16, -9)[i]
-        ay = (-18, -16, -9, 0, 9, 16, 18, 16, 9, 0, -9, -16)[i]
-        fill_circle(x + 82 + ax, y + 52 + ay, 3, (250, 214, 70))
-    # Indonesian flag
-    fill_rect(x + 152, y + 20, 96, 32, (206, 52, 52))
-    fill_rect(x + 152, y + 52, 96, 32, (244, 242, 238))
-    fill_rect(x + 152, y + 20, 96, 2, (120, 120, 120))
-    fill_rect(x + 152, y + 82, 96, 2, (120, 120, 120))
-    # container ship
-    fill_quad((x + 252, y + 100), (x + 468, y + 100), (x + 452, y + 128),
-              (x + 268, y + 128), (36, 48, 84))
-    fill_rect(x + 262, y + 100, 206, 6, (52, 66, 104))
-    fill_rect(x + 420, y + 74, 34, 26, (226, 228, 232))
-    fill_rect(x + 426, y + 80, 22, 8, (60, 80, 130))
-    fills = ((70, 96, 150), (196, 78, 62), (66, 132, 88), (206, 150, 60),
-             (150, 72, 130), (72, 110, 150))
-    cx = x + 272
-    for i in range(6):
-        fill_rect(cx, y + 86, 22, 14, fills[i])
-        cx += 24
-    for i in range(5):
-        fill_rect(x + 296 + i * 24, y + 72, 22, 14, fills[(i + 3) % 6])
-    for wx in range(0, 464, 48):
-        fill_rect(x + wx, y + 122, 30, 4, (96, 152, 208))
-
-
-def scene_peru(x, y, sw, sh):
-    fill_rect(x, y, 472, 134, (170, 206, 234))
-    fill_rect(x, y, 472, 36, (146, 190, 228))
-    fill_tri((x - 10, y + 134), (x + 140, y + 22), (x + 296, y + 134),
-             (126, 132, 146))
-    fill_tri((x + 150, y + 134), (x + 330, y + 8), (x + 486, y + 134),
-             (104, 110, 126))
-    fill_tri((x + 96, y + 58), (x + 140, y + 22), (x + 186, y + 58),
-             (238, 240, 244))
-    fill_tri((x + 282, y + 50), (x + 330, y + 8), (x + 382, y + 50),
-             (238, 240, 244))
-    fill_rect(x, y + 124, 472, 10, (156, 136, 112))
-    # seismograph trace
-    fill_rect(x + 16, y + 88, 190, 34, (250, 250, 246))
-    fill_rect(x + 16, y + 88, 190, 2, (150, 148, 144))
-    fill_rect(x + 16, y + 120, 190, 2, (150, 148, 144))
-    fill_rect(x + 16, y + 88, 2, 34, (150, 148, 144))
-    fill_rect(x + 204, y + 88, 2, 34, (150, 148, 144))
-    pts = ((x + 24, y + 106), (x + 60, y + 106), (x + 72, y + 94),
-           (x + 84, y + 118), (x + 92, y + 100), (x + 106, y + 108),
-           (x + 130, y + 106), (x + 150, y + 106), (x + 162, y + 98),
-           (x + 174, y + 112), (x + 198, y + 106))
-    for i in range(len(pts) - 1):
-        draw_line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], 2,
-                  (34, 34, 40))
-    # two office towers leaning apart in the shake
-    fill_quad((x + 278, y + 52), (x + 298, y + 52), (x + 288, y + 130),
-              (x + 268, y + 130), (200, 200, 208))
-    fill_quad((x + 278, y + 52), (x + 298, y + 52), (x + 296, y + 60),
-              (x + 276, y + 60), (232, 232, 238))
-    fill_quad((x + 322, y + 40), (x + 346, y + 40), (x + 366, y + 130),
-              (x + 342, y + 130), (166, 166, 176))
-    fill_quad((x + 322, y + 40), (x + 346, y + 40), (x + 343, y + 48),
-              (x + 319, y + 48), (210, 210, 218))
-    fill_quad((x + 366, y + 40), (x + 342, y + 130), (x + 348, y + 130),
-              (x + 372, y + 40), (128, 128, 138))
-    for i in range(6):
-        fill_rect(x + 276 - (i * 13) // 10, y + 68 + i * 10, 10, 6, (248, 242, 224))
-        fill_rect(x + 324 + (i * 8) // 3, y + 58 + i * 12, 10, 6, (248, 242, 224))
-    # a crack opening in the ground
-    draw_line(x + 372, y + 128, x + 392, y + 120, 2, (120, 100, 80))
-    draw_line(x + 392, y + 120, x + 410, y + 130, 2, (120, 100, 80))
-    # people in the street
-    for px, ph in ((x + 226, 40), (x + 248, 34), (x + 268, 44), (x + 412, 38),
-                   (x + 434, 44), (x + 454, 34)):
-        fill_rect(px, y + 134 - ph, 11, ph - 11, (58, 58, 70))
-        fill_circle(px + 5, y + 134 - ph - 5, 6, (76, 74, 72))
-
-
-def scene_usa(x, y, sw, sh):
-    fill_rect(x, y, 472, 134, (44, 50, 66))
-    fill_rect(x, y, 472, 10, (34, 40, 54))
-    # monitor showing a broken padlock
-    fill_rect(x + 24, y + 14, 220, 106, (24, 26, 32))
-    fill_rect(x + 32, y + 22, 204, 90, (46, 92, 152))
-    fill_rect(x + 32, y + 22, 204, 6, (30, 68, 120))
-    pxc = x + 134
-    pyc = y + 60
-    fill_ring(pxc, pyc - 16, 17, 6, (216, 176, 64))
-    fill_rect(x + 96, y + 60, 78, 40, (222, 182, 70))
-    fill_rect(x + 96, y + 60, 78, 5, (188, 150, 52))
-    fill_rect(x + 96, y + 95, 78, 5, (196, 160, 56))
-    fill_circle(pxc + 1, y + 80, 7, (44, 44, 52))
-    fill_rect(pxc - 2, y + 80, 6, 14, (44, 44, 52))
-    # the break: severed left shackle arm, right arc displaced upward
-    fill_ring(x + 134, y + 44, 17, 7, (216, 176, 64))
-    fill_rect(x + 92, y + 46, 58, 26, (46, 92, 152))
-    draw_arc(x + 143, y + 52, 19, 7, 47, 63, (216, 176, 64))
-    draw_line(x + 118, y + 30, x + 132, y + 22, 3, (30, 30, 36))
-    draw_line(x + 150, y + 22, x + 162, y + 30, 3, (30, 30, 36))
-    # police shield
-    fill_rect(x + 304, y + 26, 60, 50, (40, 74, 150))
-    fill_tri((x + 304, y + 72), (x + 364, y + 72), (x + 334, y + 106),
-             (40, 74, 150))
-    fill_rect(x + 304, y + 26, 60, 5, (24, 48, 104))
-    fill_circle(x + 334, y + 48, 13, (232, 200, 80))
-    fill_tri((x + 322, y + 66), (x + 346, y + 66), (x + 334, y + 38),
-             (24, 48, 104))
-    fill_tri((x + 329, y + 42), (x + 339, y + 42), (x + 334, y + 62),
-             (24, 48, 104))
-    # record card with a fingerprint
-    fill_rect(x + 380, y + 84, 84, 44, (238, 236, 228))
-    fill_rect(x + 380, y + 84, 84, 3, (150, 148, 142))
-    fill_rect(x + 380, y + 125, 84, 3, (150, 148, 142))
-    for r, col in ((18, (46, 46, 52)), (14, (238, 236, 228)),
-                   (10, (46, 46, 52)), (5, (238, 236, 228)),
-                   (2, (46, 46, 52))):
-        fill_circle(x + 422, y + 106, r, col)
-    # files
-    for fx, fy in ((x + 262, y + 108), (x + 288, y + 112), (x + 316, y + 106)):
-        fill_rect(fx, fy, 18, 22, (222, 198, 142))
-        fill_rect(fx, fy, 18, 4, (196, 170, 116))
-
-
-# ------------------------------------------------------------- the pages --
-
-def draw_panel(px, py, pw, ph, scene_fn, tag, tagcolour, headline, caption):
-    fill_rect(px, py, pw, ph, (252, 250, 244))
-    fill_rect(px, py, pw, 2, EDGE)
-    fill_rect(px, py + ph - 2, pw, 2, EDGE)
-    fill_rect(px, py, 2, ph, EDGE)
-    fill_rect(px + pw - 2, py, 2, ph, EDGE)
-    sx = px + 8
-    sy = py + 8
-    sw = pw - 16
-    sh = 134
-    fill_rect(sx, sy, sw, sh, PAPER)
-    set_clip(sx, sy, sx + sw, sy + sh)
-    scene_fn(sx, sy, sw, sh)
-    reset_clip()
-    fill_rect(sx, sy, sw, 2, (150, 146, 140))
-    fill_rect(sx, sy + sh - 2, sw, 2, (150, 146, 140))
-    fill_rect(sx, sy, 2, sh, (150, 146, 140))
-    fill_rect(sx + sw - 2, sy, 2, sh, (150, 146, 140))
-    # region chip
-    cy = py + 148
-    chipw = text_width(tag, 1) + 18
-    fill_rect(px + 12, cy, chipw, 18, tagcolour)
-    draw_text(px + 21, cy + 6, tag, 1, WHITE)
-    # headline rule, headline and caption in dark ink on the paper background
-    tx = px + 13
-    tw = pw - 26
-    fill_rect(tx, py + 172, tw - 26, 1, EDGE)
-    hy = py + 178
-    for i, line in enumerate(wrap_fit(headline, tw, 2, 2)):
-        draw_text(tx, hy + i * 21, line, 2, INK)
-    ky = py + 226
-    for i, line in enumerate(wrap_fit(caption, tw, 1, 2)):
-        draw_text(tx, ky + i * 11, line, 1, CAPINK)
-
-
-def draw_masthead():
-    fill_rect(0, 0, W, 140, NAVY)
-    fill_rect(0, 0, W, 6, (10, 18, 36))
-    draw_text_center(W // 2, 18, "THE WORLD IN ONE IMAGE", 6, WHITE)
-    draw_text_center(W // 2, 78, "SUNDAY 22 NOVEMBER 2026", 4, (248, 216, 120),
-                     tracking=2 * 4)
-    fill_rect(160, 120, 704, 3, (120, 150, 200))
-
-
-def draw_footer():
-    fill_rect(0, H - 40, W, 40, PAPER)
-    fill_rect(16, H - 40, W - 32, 2, EDGE)
-    draw_text_center(W // 2, H - 26,
-                     "SOURCES: REUTERS - AP - AFP - 22 NOVEMBER 2026",
-                     1, CAPINK)
-
-
-STORIES = (
-    (scene_gulf, "GULF", (150, 60, 44),
-     "IRAN MISSILE AND DRONE STRIKES ON US BASES IN BAHRAIN",
-     "Iran says it hit two Patriot radars. US Central Command says the weapons were intercepted, with no US casualties. Bahrain reports a factory fire."),
-    (scene_mexico, "MEXICO", (30, 104, 76),
-     "MEXICO CAPTURES FBI MOST WANTED 'EL CHAPO ISIDRO'",
-     "Fausto Isidro Meza Flores, an FBI most wanted with a $5 million reward, was seized in Guasave, Sinaloa. The raid left 11 dead and eight arrested."),
-    (scene_climate, "CLIMATE", (14, 104, 104),
-     "COP31 TALKS IN TURKEY GO INTO OVERTIME OVER FOSSIL FUELS",
-     "The Antalya draft drops all mention of fossil fuels and a $120 billion adaptation target, after opposition from oil producers."),
-    (scene_eu_indonesia, "EU-INDONESIA", (24, 52, 132),
-     "EU AND INDONESIA SIGN TRADE DEAL AFTER TEN YEARS",
-     "Signed in Brussels after ten years of talks, the pact ends duties on more than 90 percent of products and should take effect in early 2027."),
-    (scene_peru, "PERU", (150, 96, 24),
-     "MAGNITUDE 6.7 QUAKE SHAKES CENTRAL PERU",
-     "The quake struck 34 km north of Junin at a depth of 108 km and was felt in Lima, where residents rushed into the streets. No damage was reported."),
-    (scene_usa, "USA", (128, 32, 48),
-     "FBI PROBES HACK OF ITS CRIME RECORDS DATABASE",
-     "The apparent breach of the National Crime Information Center, first reported by CNN and confirmed to AP, is the second FBI system hit in months."),
-)
-
-
-def build_image():
-    fill_rect(0, 0, W, H, PAPER)
-    draw_masthead()
-    draw_footer()
-    pw = 488
-    ph = 270
-    for i, (scene_fn, tag, colour, head, cap) in enumerate(STORIES):
-        px = 16 + (i % 2) * (pw + 16)
-        py = 140 + (i // 2) * 286
-        draw_panel(px, py, pw, ph, scene_fn, tag, colour, head, cap)
-
-
-# ------------------------------------------------------------------- png ---
-
-def png_chunk(tag, data):
-    return (struct.pack(">I", len(data)) + tag + data
-            + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
-
+def draw_text(x, y, value, scale, color):
+    for ch in value.upper():
+        rows = FONT.get(ch, FONT[' ']).split()
+        for yy, row in enumerate(rows):
+            for xx, bit in enumerate(row):
+                if bit == '1': rect(x+xx*scale, y+yy*scale, scale, scale, color)
+        x += 6*scale
 
 def png_bytes():
-    raw = bytearray()
-    for y in range(H):
-        raw.append(0)
-        raw += CANVAS[y * STRIDE:(y + 1) * STRIDE]
-    return b"".join((
-        b"\x89PNG\r\n\x1a\n",
-        png_chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)),
-        png_chunk(b"IDAT", zlib.compress(bytes(raw), 9)),
-        png_chunk(b"IEND", b""),
-    ))
+    raw = b''.join(b'\0' + bytes(row) for row in IMG)
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind+data)&0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
+def scene_gulf(x, y, w, h):
+    clip(x, y, x+w, y+h)
+    rect(x, y, w, h, (227, 207, 165)); rect(x, y+58, w, h-58, (188, 155, 107))
+    circle(x+194, y+17, 10, (249, 232, 189))
+    rect(x+8, y+52, 74, 28, (70, 76, 77)); rect(x+18, y+42, 15, 12, (70, 76, 77))
+    for px in (25, 49, 68): rect(x+px, y+60, 8, 12, (248, 211, 117))
+    line(x+132, y+56, x+157, y+32, (47, 58, 67), 3); line(x+157, y+32, x+182, y+56, (47, 58, 67), 3)
+    circle(x+157, y+37, 5, (239, 236, 219))
+    for px, py in ((100,22),(207,41)):
+        line(x+px, y+py, x+px+29, y+py-12, (175, 61, 44), 3)
+        line(x+px+26, y+py-12, x+px+34, y+py-12, (255, 205, 111), 4)
+    rect(x+190, y+62, 34, 18, (102, 75, 60)); circle(x+215,y+53,8,(117,111,101)); circle(x+224,y+45,6,(145,133,116))
+    clip(0, 0, W, H)
+
+def scene_ukraine(x, y, w, h):
+    clip(x, y, x+w, y+h)
+    rect(x,y,w,h,(22,35,66)); rect(x,y+63,w,25,(42,55,68))
+    for bx,bh in ((8,32),(40,46),(80,28),(124,51),(170,38),(207,31)):
+        rect(x+bx,y+88-bh,25,bh,(55,68,82))
+        for wy in range(y+88-bh+6,y+84,10):
+            rect(x+bx+5,wy,4,4,(229,185,96)); rect(x+bx+15,wy,4,4,(229,185,96))
+    line(x+7,y+63,x+82,y+63,(179,180,171),3); line(x+82,y+63,x+120,y+75,(179,180,171),3)
+    line(x+120,y+75,x+230,y+75,(179,180,171),3)
+    for px,py in ((33,14),(90,26),(167,13),(205,28)):
+        circle(x+px,y+py,3,(245,195,109)); line(x+px,y+py,x+px+10,y+py-5,(230,105,62),2)
+    clip(0, 0, W, H)
+
+def scene_poland(x, y, w, h):
+    clip(x, y, x+w, y+h)
+    rect(x,y,w,h,(196,215,192)); rect(x,y+58,w,30,(139,176,127))
+    line(x+122,y+2,x+122,y+86,(247,247,233),4); line(x+128,y+2,x+128,y+86,(63,104,84),2)
+    for px,py in ((53,14),(162,25)):
+        line(x+px,y+py,x+px+20,y+py+39,(181,63,48),4); circle(x+px+20,y+py+39,4,(230,94,57))
+    rect(x+174,y+7,47,30,(29,53,84))
+    for idx in range(5): circle(x+184+idx*7,y+17+(idx%2)*7,2,(244,213,111))
+    clip(0, 0, W, H)
+
+def scene_mexico(x, y, w, h):
+    clip(x,y,x+w,y+h)
+    rect(x,y,w,h,(32,42,58)); rect(x,y+62,w,26,(57,52,50))
+    for bx in (6,50,101,161,205):
+        rect(x+bx,y+19,31,49,(50,58,65)); rect(x+bx+7,y+28,5,8,(229,187,99)); rect(x+bx+19,y+28,5,8,(229,187,99))
+    rect(x+13,y+4,49,37,(239,224,192)); rect(x+21,y+12,14,11,(82,93,90)); line(x+21,y+26,x+47,y+26,(138,54,51),2)
+    line(x+91,y+18,x+148,y+18,(55,63,73),3); line(x+105,y+12,x+105,y+23,(55,63,73),3)
+    line(x+132,y+12,x+132,y+23,(55,63,73),3); line(x+104,y+18,x+89,y+27,(55,63,73),2); line(x+136,y+18,x+151,y+27,(55,63,73),2)
+    circle(x+125,y+56,7,(196,165,130)); rect(x+117,y+63,18,21,(43,65,79)); line(x+114,y+67,x+138,y+67,(224,196,157),2)
+    clip(0, 0, W, H)
+
+def scene_climate(x, y, w, h):
+    clip(x,y,x+w,y+h); rect(x,y,w,h,(48,70,73)); rect(x,y+65,w,23,(34,50,56))
+    for bx in (12,53,94,143,190):
+        rect(x+bx,y+47,27,19,(76,93,91)); rect(x+bx+4,y+52,5,5,(222,196,143))
+    circle(x+116,y+30,23,(85,153,143)); line(x+94,y+30,x+138,y+30,(220,231,207),2)
+    line(x+116,y+8,x+116,y+52,(220,231,207),2); circle(x+116,y+30,10,(63,130,123))
+    rect(x+181,y+27,39,22,(97,70,56)); circle(x+200,y+27,20,(176,72,51)); line(x+183,y+10,x+216,y+44,(243,216,177),4)
+    clip(0,0,W,H)
+
+def scene_baltic(x, y, w, h):
+    clip(x,y,x+w,y+h); rect(x,y,w,h,(143,192,208)); rect(x,y+48,w,40,(45,111,146))
+    rect(x+54,y+38,131,25,(47,55,63)); rect(x+70,y+24,24,14,(77,85,87)); rect(x+103,y+28,22,10,(77,85,87))
+    rect(x+78,y+34,96,5,(200,183,154))
+    for px in (105,122,139): circle(x+px,y+17,8,(112,104,94))
+    line(x+41,y+58,x+48,y+51,(234,96,49),4); line(x+48,y+51,x+54,y+57,(244,188,84),4)
+    rect(x+190,y+59,39,13,(239,239,224)); rect(x+202,y+51,13,9,(239,239,224))
+    line(x+207,y+53,x+207,y+35,(239,239,224),2); line(x+191,y+48,x+171,y+34,(237,249,246),2)
+    clip(0,0,W,H)
+
+def scene_trade(x, y, w, h):
+    clip(x,y,x+w,y+h); rect(x,y,w,h,(220,229,218)); rect(x,y+60,w,28,(65,122,145))
+    circle(x+59,y+25,18,(37,81,146))
+    for ox,oy in ((0,-14),(10,-10),(14,0),(10,10),(0,14),(-10,10),(-14,0),(-10,-10)):
+        circle(x+59+ox,y+25+oy,2,(250,220,105))
+    rect(x+96,y+8,43,34,(202,61,49)); rect(x+114,y+8,8,34,(239,218,174)); rect(x+96,y+21,43,8,(239,218,174))
+    for bx,by,color in ((12,49,(185,98,53)),(49,44,(73,119,132)),(89,51,(192,141,64)),(149,47,(185,98,53)),(189,51,(73,119,132))):
+        rect(x+bx,y+by,34,61-by,color)
+    line(x+148,y+68,x+183,y+68,(48,59,67),2); line(x+155,y+68,x+161,y+56,(48,59,67),2)
+    line(x+161,y+56,x+173,y+56,(48,59,67),2)
+    clip(0,0,W,H)
+
+def scene_peru(x, y, w, h):
+    clip(x,y,x+w,y+h); rect(x,y,w,h,(172,201,199))
+    for ax,ay,bx,by in ((0,53,40,17),(40,17,83,55),(75,53,125,10),(125,10,177,52),(161,53,203,22)):
+        line(x+ax,y+ay,x+bx,y+by,(83,119,108),3)
+    rect(x,y+60,w,28,(194,175,145))
+    for bx in (18,60,104,150,194):
+        rect(x+bx,y+48,23,21,(207,199,174)); rect(x+bx+8,y+39,7,10,(207,199,174))
+        line(x+bx+1,y+51,x+bx+4,y+45,(177,91,62),2)
+    line(x+10,y+79,x+30,y+78,(70,68,64),2); line(x+30,y+78,x+39,y+68,(70,68,64),2)
+    line(x+39,y+68,x+48,y+75,(189,51,48),3); line(x+48,y+75,x+61,y+78,(70,68,64),2)
+    for px,color in ((77,(53,77,94)),(96,(130,74,56))):
+        circle(x+px,y+77,4,color); rect(x+px-3,y+81,6,7,color)
+    clip(0,0,W,H)
+
+LEADS = [
+('GULF','Iran strikes Bahrain; claims disputed','US says weapons intercepted; Bahrain reports fire.','gulf',(166,82,48)),
+('UKRAINE','Russia strikes Ukraine overnight','More than 400 drones, 110 missiles; at least eight killed.','ukraine',(55,94,153)),
+('POLAND','Missiles fall in Poland','NATO calls breach grave; Poland says likely provocation.','poland',(63,121,85)),
+('MEXICO','Mexico captures cartel leader','Fausto Isidro Meza Flores seized in Sinaloa; 11 died in operation.','mexico',(145,68,56)),
+('CLIMATE','COP31 talks run late','Draft drops fossil-fuel language and proposed adaptation target.','climate',(47,111,100)),
+('BALTIC','Cargo ship burns in Gulf','Crew evacuated after drone strike; ship drifted into Finnish waters.','baltic',(49,120,150)),
+('EU-INDONESIA','EU-Indonesia trade deal','Agreement signed in Brussels after ten years of negotiations.','trade',(42,105,135)),
+('PERU','Strong quake shakes Andes','Magnitude 6.7; felt in Lima, with no reported casualties or damage.','peru',(130,83,64)),
+]
+
+BRIEFS = [
+'USA - FBI probes suspected NCIC database hack; Trump: "It\'s not good."',
+'USA - Senate rejects bid to curb president\'s war powers',
+'UKRAINE - Kryvyi Rih missile kills 2, incl. 7-year-old; 60 wounded',
+'UK - Britain to send Ukraine 1,000+ long-range drones, GBP 260m package',
+'EU - EU grants EUR 1bn more military aid to Ukraine, incl. drones',
+'UKRAINE - Strike sends part of Kerch bridge into the strait',
+'DENMARK - Expels Russian defence attache over plot to kill rapper',
+'ESTONIA - To shut Russia border crossings after foiled arson attack',
+'EUROPE - Gen Z protests in 25 countries over prices, arms spending',
+'UK-EU - Closer on carbon permits and youth mobility',
+'CANADA - Joins NATO Innovation Fund with USD 100m',
+'NEPAL - Balendra Shah lands in Delhi; seeks USD 2bn, Modi talks Monday',
+'INDIA - Core industries grow 10.9 pct in October, best in over a year',
+'WORLD COURT - ICJ: Myanmar responsible for Rohingya genocide, 9-6',
+'APEC - Leaders meet in Shenzhen; pledge supply-chain resilience',
+'UN - Nations keep working on AI-weapons rules; no binding deal',
+'UN - Chief urges new climate justice pact at COP31',
+'IRAN - FM open to US talks, but will not give up enriched uranium',
+'GAZA - Israel launches new central Gaza offensive despite ceasefire',
+'PALESTINE - UN: Israel failed to protect olive farmers from settler attacks',
+'YEMEN - Saudi strikes hit Hodeidah port; 11 civilians killed',
+'SUDAN - WFP pledges emergency food for 30,000 displaced in north',
+'CONGO - Staple prices double in Bukavu as fighting disrupts trade',
+'S. AFRICA - Protests over gender violence; 581 women killed in 3 months',
+'MARKETS - US stocks fall in AI-led sell-off',
+'HEALTH - Trial pill daraxonrasib shows promise vs pancreatic cancer',
+'USA - Nikhil Gupta jailed about 20 years in Pannun murder plot',
+]
+
+SCENES = [scene_gulf,scene_ukraine,scene_poland,scene_mexico,
+          scene_climate,scene_baltic,scene_trade,scene_peru]
+
+def wrap_words(value, limit, max_lines):
+    lines, current = [], ''
+    for word in value.split():
+        candidate = word if not current else current+' '+word
+        if len(candidate) <= limit:
+            current = candidate
+        elif len(lines) < max_lines-1:
+            lines.append(current); current = word
+        else:
+            break
+    if current: lines.append(current)
+    return lines
+
+def panel(index, story):
+    tag, headline, caption, scene, accent = story
+    x = 16 + (index % 4) * 249
+    y = 112 + (index // 4) * 224
+    rect(x, y, 239, 216, (255,255,255))
+    rect(x, y, 239, 1, (183,184,177)); rect(x, y+215, 239, 1, (183,184,177))
+    rect(x, y, 1, 216, (183,184,177)); rect(x+238, y, 1, 216, (183,184,177))
+    SCENES[index](x+3, y+3, 233, 86)
+    chip_width = min(224, len(tag)*6+8)
+    rect(x+5, y+92, chip_width, 12, accent)
+    draw_text(x+9, y+94, tag, 1, WHITE)
+    for row, value in enumerate(wrap_words(headline, 18, 2)):
+        draw_text(x+5, y+109+row*15, value, 2, INK)
+    for row, value in enumerate(wrap_words(caption, 37, 2)):
+        draw_text(x+5, y+150+row*9, value, 1, MUTED)
+
+def make_image():
+    rect(0,0,W,104,NAVY)
+    title, date = 'THE WORLD IN ONE IMAGE', 'SUNDAY 22 NOVEMBER 2026'
+    draw_text((W-len(title)*36)//2, 4, title, 6, WHITE)
+    draw_text((W-len(date)*24)//2, 50, date, 4, (247,222,166))
+    sub = '35 STORIES - 6 REGIONS'
+    draw_text((W-len(sub)*6)//2, 90, sub, 1, WHITE)
+    for idx, story in enumerate(LEADS): panel(idx, story)
+    rect(16,560,992,2,(42,57,71))
+    draw_text(16,568,'ALSO ON SUNDAY 22 NOVEMBER 2026',2,INK)
+    rect(511,592,1,366,(196,194,184))
+    for idx, brief in enumerate(BRIEFS):
+        col, row = (0,idx) if idx < 14 else (1,idx-14)
+        xpos = 16 if col == 0 else 524
+        ypos = 594 + row*27
+        if len(brief) > 76:
+            brief = brief[:73].rsplit(' ',1)[0] + '...'
+        draw_text(xpos,ypos,brief,1,INK)
+    rect(0,976,W,48,NAVY)
+    source = 'SOURCES: REUTERS - AP - AFP - CNN - 22 NOVEMBER 2026'
+    draw_text((W-len(source)*6)//2,994,source,1,WHITE)
 
 def main():
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(outdir, exist_ok=True)
-    build_image()
-    data = png_bytes()
-    with open(os.path.join(outdir, "entry.png"), "wb") as fh:
-        fh.write(data)
+    make_image()
+    output = os.environ.get('MAKEFUN_OUTPUT_DIR','/output')
+    os.makedirs(output,exist_ok=True)
+    with open(os.path.join(output,'entry.png'),'wb') as stream:
+        stream.write(png_bytes())
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
